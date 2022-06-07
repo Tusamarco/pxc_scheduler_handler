@@ -272,6 +272,9 @@ func (cluster *DataClusterImpl) init(config global.Configuration, connectionProx
 
 	//Enable SSL support
 	if config.Pxcluster.SslClient != "" && config.Pxcluster.SslKey != "" && config.Pxcluster.SslCa != "" {
+		if global.Performance {
+			global.SetPerformanceObj("ssl_certificates_read", true, log.InfoLevel)
+		}
 		ssl := new(SslCertificates)
 		ssl.sslClient = config.Pxcluster.SslClient
 		ssl.sslKey = config.Pxcluster.SslKey
@@ -288,6 +291,9 @@ func (cluster *DataClusterImpl) init(config global.Configuration, connectionProx
 			ssl.sslCertificatePath = path
 		}
 		cluster.Ssl = ssl
+		if global.Performance {
+			global.SetPerformanceObj("ssl_certificates_read", false, log.InfoLevel)
+		}
 	}
 
 	//Get parameters from the config file
@@ -332,6 +338,9 @@ func (cluster *DataClusterImpl) init(config global.Configuration, connectionProx
 // We will use the Nodes list with all the IP:Port pair no matter what HG to check the nodes and then will assign the information to the relevant node collection
 // like Bkup(r/w) or Readers/Writers
 func (cluster *DataClusterImpl) getNodesInfo() bool {
+	if global.Performance {
+		global.SetPerformanceObj("Get_Nodes_Info", true, log.InfoLevel)
+	}
 	var waitingGroup global.MyWaitGroup
 
 	//Before getting the information, we check if any node in the ConfigHgRange is gone lost and if so we try to add it back
@@ -348,6 +357,9 @@ func (cluster *DataClusterImpl) getNodesInfo() bool {
 			log.Debug("Retrieving information from node: ", key)
 		}
 	}
+
+	log.Debug(fmt.Sprintf("waitingGroup composed by : #%d nodes", waitingGroup.ReportCounter()))
+
 	start := time.Now().UnixNano()
 	for i := 0; i < cluster.CheckTimeout; i++ {
 		time.Sleep(1 * time.Millisecond)
@@ -359,11 +371,17 @@ func (cluster *DataClusterImpl) getNodesInfo() bool {
 	}
 	end := time.Now().UnixNano()
 	timems := (end - start) / 1000000
-	log.Debug("time taken :", timems, " checkTimeOut : ", cluster.CheckTimeout)
+	log.Debug("time taken : ", timems, " ms; checkTimeOut : ", cluster.CheckTimeout, " ms")
 	if int(timems) > cluster.CheckTimeout {
-		log.Error("CheckTimeout exceeded try to increase it above the execution time : ", timems)
+		log.Warning("CheckTimeout exceeded try to increase it above the execution time : ", timems)
+		if waitingGroup.ReportCounter() > 0 {
+			log.Debug("waitingGroup composed by [after loop]: #", waitingGroup.ReportCounter())
+		}
 		//os.Exit(1)
 
+	}
+	if global.Performance {
+		global.SetPerformanceObj("Get_Nodes_Info", false, log.InfoLevel)
 	}
 	return true
 }
@@ -501,7 +519,9 @@ func (cluster *DataClusterImpl) identifyPrimaryBackupNode(dns string) int {
 
 //load values from db disk in ProxySQL
 func (cluster *DataClusterImpl) getParametersFromProxySQL(config global.Configuration) bool {
-
+	if global.Performance {
+		global.SetPerformanceObj("Get_Parametes_from_ProxySQL", true, log.InfoLevel)
+	}
 	cluster.ClusterIdentifier = config.Pxcluster.ClusterId
 	cluster.HgWriterId = config.Pxcluster.HgW
 	cluster.HgReaderId = config.Pxcluster.HgR
@@ -531,6 +551,9 @@ func (cluster *DataClusterImpl) getParametersFromProxySQL(config global.Configur
 	}
 	cluster.OffLineHgReaderID = cluster.MaintenanceHgRange + cluster.HgReaderId
 	cluster.OffLineHgWriterId = cluster.MaintenanceHgRange + cluster.HgWriterId
+	if global.Performance {
+		global.SetPerformanceObj("Get_Parametes_from_ProxySQL", false, log.InfoLevel)
+	}
 	return true
 	//}
 
@@ -694,7 +717,7 @@ func (cluster *DataClusterImpl) GetActionList() map[string]DataNodeImpl {
 
 /*
 We need to check if for any reasons we left some node suspended in the maintenance groups
-this can happen if script is interrupted or maual action
+this can happen if script is interrupted or manual action
 */
 func (cluster *DataClusterImpl) cleanUpForLeftOver() bool {
 	//arrayOfMaps := [2]map[string]DataNodeImpl{cluster.WriterNodes, cluster.ReaderNodes}
@@ -743,8 +766,12 @@ func (cluster *DataClusterImpl) checkFailoverIfFound() bool {
 	if cluster.RequireFailover &&
 		len(cluster.WriterNodes) < 1 &&
 		cluster.FailOverNode.HostgroupId == 0 {
+		//TODO try to help the user identify the most common issues like:
+		// 1) no node in the main segment
+		// 2) node is not processed correctly (security/network)
+
 		//Huge alert
-		log.Error(fmt.Sprintf("!!!!!!!!!!!!!!! NO node Found For fail-over in the main segment %d - check also for possible connection security errors, or if you have READ-ONLY flag=ON!!!!!!!!!!!!!",
+		log.Error(fmt.Sprintf("!!!!!!!!!!!!!!! NO node Found For fail-over in the main segment %d check if ;gmcast.segment; value in wsrep_provider_option matches the mainSegment in the configuration. Also check for possible connection security errors, or if you have READ-ONLY flag=ON!!!!!!!!!!!!!",
 			cluster.MainSegment))
 		return false
 	}
@@ -925,7 +952,7 @@ func (cluster *DataClusterImpl) evaluateNode(node DataNodeImpl) DataNodeImpl {
 			//# in the case node is not in one of the declared state
 			//# BUT it has the counter retry set THEN I reset it to 0 whatever it was because
 			//# I assume it is ok now
-			//TODO this MUST be checked I suspect it will not be act right
+			//TODO this MUST be checked I suspect it will not act right
 			cluster.checkUpSaveRetry(node, currentHg)
 
 		}
@@ -1182,7 +1209,9 @@ func (cluster *DataClusterImpl) cleanWriters() bool {
 
 	}
 	if len(cluster.WriterNodes) < 1 {
-		cluster.RequireFailover = true
+		if cluster.checkActiveFailover() {
+			cluster.RequireFailover = true
+		}
 		cluster.HasPrimary = false
 	}
 	return cleanWriter
@@ -1236,7 +1265,7 @@ func (cluster *DataClusterImpl) evaluateWriters() bool {
 }
 
 func (cluster *DataClusterImpl) processFailoverFailBack(backupWriters map[string]DataNodeImpl) {
-	// TODO can e include in the unit test? I think this is too complex and not deterministic to do so
+	// TODO can we include in the unit test? I think this is too complex and not deterministic to do so
 	for key, node := range backupWriters {
 		// First of all we need to be sure node was tested
 		if _, ok := cluster.NodesPxc.internal[node.Dns]; ok {
@@ -1346,7 +1375,7 @@ func (cluster *DataClusterImpl) identifyLowerNodeToRemove(node DataNodeImpl) boo
 }
 
 func (cluster *DataClusterImpl) processUpActionMap() {
-	// TODO can e include in the unit test? I think this is too complex and not deterministic to do so
+	// TODO can we include in the unit test? I think this is too complex and not deterministic to do so
 	for key, node := range cluster.ActionNodes {
 		//While evaluating the nodes that are coming up we also check if it is a Failover Node
 		var hgI int
@@ -1460,7 +1489,7 @@ func (cluster *DataClusterImpl) processUpActionMap() {
 }
 
 func (cluster *DataClusterImpl) processDownActionMap() {
-	// TODO can e include in the unit test? I think this is too complex and not deterministic to do so
+	// TODO can we include in the unit test? I think this is too complex and not deterministic to do so
 	for key, node := range cluster.ActionNodes {
 		var hgI int
 		var portI = 0
@@ -1484,7 +1513,9 @@ func (cluster *DataClusterImpl) processDownActionMap() {
 					if _, ok := cluster.WriterNodes[node.Dns]; ok {
 						if len(cluster.WriterNodes) == 1 {
 							//if we are here this means our Writer is going down and we need to failover
-							cluster.RequireFailover = true
+							if cluster.checkActiveFailover() {
+								cluster.RequireFailover = true
+							}
 							cluster.HasFailoverNode = false
 							cluster.HasPrimary = false
 							cluster.Haswriter = false
@@ -1507,12 +1538,24 @@ func (cluster *DataClusterImpl) processDownActionMap() {
 }
 
 /*
+This function checks if the cluster has activeFailover active and return true in this case.
+If not it also raise a Warning given that not activitate failover is a bad bad idea
+ */
+func (cluster *DataClusterImpl) checkActiveFailover() bool {
+	if cluster.ActiveFailover < 1 {
+		log.Warning(fmt.Sprintf("Cluster require to perform fail-over but the settings of ActiveFailover is preventing it with a value of %d. Best practice, and default is to have ActiveFailover = 1 ",cluster.ActiveFailover))
+		return false
+	}
+	return true
+}
+
+/*
 This method identify if we have an active reader and if not will force (no matter what) the writer to be a reader.
 It will also remove the writer as reader is we have WriterIsAlsoReader <> 1 and reader group with at least 1 element
 
 */
 func (cluster *DataClusterImpl) evaluateReaders() bool {
-	// TODO can e include in the unit test? I think this is too complex and not deterministic to do so
+	// TODO can we include in the unit test? I think this is too complex and not deterministic to do so
 	readerNodes := make(map[string]DataNodeImpl)
 	CopyMap(readerNodes, cluster.ReaderNodes)
 	actionNodes := cluster.ActionNodes
@@ -1749,15 +1792,18 @@ func (node *DataNodeImpl) GetConnection() bool {
 			rootCertPool := x509.NewCertPool()
 			pem, err := ioutil.ReadFile(ca)
 			if err != nil {
-				log.Fatal(err)
+				log.Error(err, " While trying to connect to node (CA certificate) ", node.Dns)
+				return false
 			}
 			if ok := rootCertPool.AppendCertsFromPEM(pem); !ok {
-				log.Fatal("Failed to append PEM.")
+				log.Error(err, " While trying to connect to node (PEM certificate) ", node.Dns)
+				return false;
 			}
 			clientCert := make([]tls.Certificate, 0, 1)
 			certs, err := tls.LoadX509KeyPair(client, key)
 			if err != nil {
-				log.Fatal(err)
+				log.Error(err, " While trying to connect to node (Key certificate) ", node.Dns)
+				return false
 			}
 			clientCert = append(clientCert, certs)
 			mysql.RegisterTLSConfig("custom", &tls.Config{
@@ -2019,7 +2065,9 @@ func (node DataNodeImpl) getInfo(wg *global.MyWaitGroup, cluster *DataClusterImp
 		global.SetPerformanceObj(fmt.Sprintf("Get info for node %s", node.Dns), true, log.DebugLevel)
 	}
 	// Get the connection
-	node.GetConnection()
+	if !node.GetConnection(){
+		node.NodeTCPDown = true
+	}
 	/*
 		if connection is functioning we try to get the info
 		Otherwise we go on and set node as NOT processed
@@ -2048,10 +2096,19 @@ func (node DataNodeImpl) getInfo(wg *global.MyWaitGroup, cluster *DataClusterImp
 	log.Debug("node ", node.Dns, " done")
 
 	// we close the connection as soon as done
+	if global.Performance {
+		global.SetPerformanceObj(fmt.Sprintf("Closing connection for node %s", node.Dns), true, log.DebugLevel)
+	}
+
 	node.CloseConnection()
+
+	if global.Performance {
+		global.SetPerformanceObj(fmt.Sprintf("Closing connection for node %s", node.Dns), false, log.DebugLevel)
+	}
 
 	//We decrease the counter running go routines
 	wg.DecreaseCounter()
+	log.Debug(fmt.Sprintf("waitingGroup decreased by node %s: , now contains #%d",node.Dns,wg.ReportCounter() ))
 	return 0
 }
 

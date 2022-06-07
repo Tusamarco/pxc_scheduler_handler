@@ -69,7 +69,7 @@ type (
 )
 
 //Initialize the locker
-//TODO initialize
+
 func (locker *LockerImpl) Init(config *global.Configuration) bool {
 	locker.myConfig = config
 	locker.MyServerIp = config.Proxysql.Host
@@ -109,11 +109,9 @@ func (locker *LockerImpl) CheckFileLock() *ProxySQLNodeImpl {
 // All the DB operations are done connecting locally to the ProxySQL node running the scheduler
 
 func (locker *LockerImpl) CheckClusterLock() *ProxySQLNodeImpl {
-	//TODO
-	// 1 get connection
-	// 2 get all we need from ProxySQL
-	// 3 put the lock if we can
-	global.SetPerformanceObj("Cluster lock", true, log.InfoLevel)
+	if global.Performance {
+		global.SetPerformanceObj("Cluster lock", true, log.InfoLevel)
+	}
 	proxySQLCluster := new(ProxySQLClusterImpl)
 	if !locker.MyServer.IsInitialized {
 		if !locker.MyServer.Init(locker.myConfig) {
@@ -130,21 +128,28 @@ func (locker *LockerImpl) CheckClusterLock() *ProxySQLNodeImpl {
 		if proxySQLCluster.GetProxySQLnodes(locker.MyServer) && len(proxySQLCluster.Nodes) > 0 {
 			if nodes, ok := locker.findLock(proxySQLCluster.Nodes); ok && nodes != nil {
 				if locker.PushSchedulerLock(nodes) {
-					global.SetPerformanceObj("Cluster lock", false, log.InfoLevel)
+					if global.Performance {
+						global.SetPerformanceObj("Cluster lock", false, log.InfoLevel)
+					}
 					return locker.MyServer
 				} else {
-					global.SetPerformanceObj("Cluster lock", false, log.InfoLevel)
+					if global.Performance {
+						global.SetPerformanceObj("Cluster lock", false, log.InfoLevel)
+					}
 					return nil
 				}
 			} else {
 				log.Info(fmt.Sprintf("Cannot put a lock on the cluster for this scheduler %s another node hold the lock and acting", locker.MyServer.Dns))
-				global.SetPerformanceObj("Cluster lock", false, log.InfoLevel)
+				if global.Performance {
+					global.SetPerformanceObj("Cluster lock", false, log.InfoLevel)
+				}
 				return nil
 			}
 		}
 	}
-
-	global.SetPerformanceObj("Cluster lock", false, log.InfoLevel)
+	if global.Performance {
+		global.SetPerformanceObj("Cluster lock", false, log.InfoLevel)
+	}
 	return locker.MyServer
 }
 
@@ -291,6 +296,13 @@ func (locker *LockerImpl) SetLockFile() bool {
 	}
 	fullFile := locker.FileLockPath + string(os.PathSeparator) + locker.FileLock
 	if _, err := os.Stat(fullFile); err == nil && !locker.isLooped {
+		// TODO
+		//- add option for file lock timeout in ms
+		//- add function to identify if lock information in side lock file exceeds tiemout [return true|false]
+		//	if true we remove the lockfile and continue
+		//	if false we raise the error and exit
+
+
 		log.Errorf("A lock file named: %s  already exists.\n If this is a refuse of a dirty execution remove it manually to have the check able to run\n", fullFile)
 		fmt.Printf("A lock file named: %s  already exists.\n If this is a refuse of a dirty execution remove it manually to have the check able to run\n", fullFile)
 		return false
